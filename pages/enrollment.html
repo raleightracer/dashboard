@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Enrollment — Bright Minds</title>
+  <link rel="stylesheet" href="../assets/css/styles.css" />
+</head>
+<body>
+
+<script src="../assets/data/mockData.js"></script>
+<script src="../assets/js/auth.js"></script>
+<script src="../assets/js/rbac.js"></script>
+<script>
+'use strict';
+
+const session = guardPage();
+
+if (session) {
+  renderShell(session, 'Enrollment Management');
+
+  // Working copy — mutations never touch the frozen MOCK_DATA source.
+  let records      = structuredClone(MOCK_DATA.enrollments);
+  let activeFilter = 'All';
+
+  /** Updates a record's status in the working copy and re-renders. */
+  function setStatus(id, status) {
+    const rec = records.find(r => r.id === id);
+    if (rec) { rec.status = status; render(); showToast(`Application ${status.toLowerCase()}.`); }
+  }
+
+  function setFilter(val) { activeFilter = val; render(); }
+
+  function render() {
+    const filtered  = activeFilter === 'All' ? records : records.filter(r => r.status === activeFilter);
+    const counts    = { total: records.length };
+    ['Approved','Pending','Rejected'].forEach(s => { counts[s] = records.filter(r => r.status === s).length; });
+
+    document.getElementById('main-content').innerHTML = `
+      <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)">
+        <div class="stat-card accent"><div class="stat-label">Total</div><div class="stat-value">${counts.total}</div></div>
+        <div class="stat-card success"><div class="stat-label">Approved</div><div class="stat-value">${counts.Approved}</div></div>
+        <div class="stat-card warning"><div class="stat-label">Pending</div><div class="stat-value">${counts.Pending}</div></div>
+        <div class="stat-card danger"><div class="stat-label">Rejected</div><div class="stat-value">${counts.Rejected}</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Student Applications</span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${['All','Pending','Approved','Rejected'].map(s =>
+              `<button class="btn btn-sm ${activeFilter===s?'btn-primary':'btn-secondary'}"
+                       onclick="setFilter('${s}')">${s}</button>`
+            ).join('')}
+            <button class="btn btn-primary btn-sm" onclick="openAddModal()">
+              <i class="ti ti-plus" aria-hidden="true"></i> New Application
+            </button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Student</th><th>Age</th><th>Program</th>
+                <th>Parent / Guardian</th><th>Contact</th><th>Applied</th>
+                <th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.length === 0
+                ? `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:32px">No records match this filter.</td></tr>`
+                : filtered.map(e => `
+                  <tr>
+                    <td><strong>${e.studentName}</strong></td>
+                    <td>${e.age} yrs</td>
+                    <td>${e.program}</td>
+                    <td>${e.parentName}</td>
+                    <td><a href="tel:${e.contact}" style="color:var(--accent)">${e.contact}</a></td>
+                    <td>${formatDate(e.appliedDate)}</td>
+                    <td>${badge(e.status)}</td>
+                    <td>
+                      <div class="action-btns">
+                        ${e.status === 'Pending' ? `
+                          <button class="btn btn-sm btn-success" onclick="setStatus('${e.id}','Approved')" title="Approve">
+                            <i class="ti ti-check" aria-hidden="true"></i>
+                          </button>
+                          <button class="btn btn-sm btn-danger" onclick="setStatus('${e.id}','Rejected')" title="Reject">
+                            <i class="ti ti-x" aria-hidden="true"></i>
+                          </button>`
+                        : `<button class="btn btn-sm btn-secondary" onclick="setStatus('${e.id}','Pending')" title="Reset to Pending">
+                            <i class="ti ti-refresh" aria-hidden="true"></i>
+                           </button>`}
+                      </div>
+                    </td>
+                  </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  function openAddModal() {
+    openModal('New Student Application', `
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="f-name">Student Name</label>
+          <input class="form-control" id="f-name" placeholder="Full name" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="f-age">Age</label>
+          <input class="form-control" id="f-age" type="number" min="1" max="7" placeholder="3" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="f-parent">Parent / Guardian</label>
+          <input class="form-control" id="f-parent" placeholder="Full name" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="f-contact">Contact Number</label>
+          <input class="form-control" id="f-contact" placeholder="09XXXXXXXXX" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="f-program">Program</label>
+        <select class="form-control" id="f-program">
+          <option>Full Day</option>
+          <option>Half Day</option>
+        </select>
+      </div>`, () => {
+        const name    = document.getElementById('f-name').value.trim();
+        const age     = parseInt(document.getElementById('f-age').value);
+        const parent  = document.getElementById('f-parent').value.trim();
+        const contact = document.getElementById('f-contact').value.trim();
+        const program = document.getElementById('f-program').value;
+        if (!name || !age || !parent) {
+          showToast('Name, age, and parent are required.', 'danger');
+          return;
+        }
+        records.unshift({
+          id: `e${Date.now()}`, studentName: name, age, parentName: parent,
+          contact, program, status: 'Pending',
+          appliedDate: new Date().toISOString().split('T')[0],
+        });
+        render();
+        showToast('Application submitted successfully.');
+      });
+  }
+
+  document.addEventListener('DOMContentLoaded', render);
+}
+</script>
+</body>
+</html>
