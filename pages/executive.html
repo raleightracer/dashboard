@@ -21,11 +21,19 @@ if (session) {
 
   document.addEventListener('DOMContentLoaded', () => {
     const s        = MOCK_DATA.executiveSummary;
-    const approved = MOCK_DATA.enrollments.filter(e => e.status === 'Approved').length;
-    const pending  = MOCK_DATA.enrollments.filter(e => e.status === 'Pending').length;
+    const areas = getEnrollmentAreas();
+    const allStudents = areas.flatMap(area =>
+      area.students.map(st => ({ ...st, areaName: area.name, areaId: area.id }))
+    );
+    const approved = allStudents.filter(su => su.enrollmentStatus === 'Approved').length;
+    const pending  = allStudents.filter(su => su.enrollmentStatus === 'Pending').length;
     const openProc = MOCK_DATA.purchaseRequests.filter(p => p.status === 'Pending').length;
     const budgetPct = Math.round((s.monthlyBudgetUsed / s.monthlyBudgetTotal) * 100);
     const budgetBarColor = budgetPct > 80 ? '#ef4444' : budgetPct > 60 ? '#f59e0b' : '#6366f1';
+    const recentStudents = allStudents
+      .slice()
+      .sort((a, b) => (b.firstDayOfSchool || '').localeCompare(a.firstDayOfSchool || ''))
+      .slice(0, 8);
 
     document.getElementById('main-content').innerHTML = `
       <div class="stat-grid">
@@ -84,7 +92,7 @@ if (session) {
       <div class="card">
         <div class="card-header">
           <span class="card-title">Recent Enrollment Applications</span>
-          <a href="enrollment.html" class="btn btn-secondary btn-sm">
+          <a href="enrollment.html?area=area1" class="btn btn-secondary btn-sm">
             <i class="ti ti-arrow-right" aria-hidden="true"></i> View All
           </a>
         </div>
@@ -92,19 +100,19 @@ if (session) {
           <table>
             <thead>
               <tr>
-                <th>Student</th><th>Age</th><th>Program</th>
-                <th>Parent / Guardian</th><th>Applied</th><th>Status</th>
+                <th>Student</th><th>Area</th><th>Class</th>
+                <th>Parent / Guardian</th><th>First Day</th><th>Status</th>
               </tr>
             </thead>
             <tbody>
-              ${MOCK_DATA.enrollments.map(e => `
+              ${recentStudents.map(e => `
                 <tr>
-                  <td><strong>${e.studentName}</strong></td>
-                  <td>${e.age} yrs</td>
-                  <td>${e.program}</td>
-                  <td>${e.parentName}</td>
-                  <td>${formatDate(e.appliedDate)}</td>
-                  <td>${badge(e.status)}</td>
+                  <td><strong>${e.firstName} ${e.lastName}</strong></td>
+                  <td>${e.areaName}</td>
+                  <td>${e.classroomId?.includes('infant') ? 'Infant' : 'Toddler'}</td>
+                  <td>${e.guardian?.fullName || '—'}</td>
+                  <td>${formatDate(e.firstDayOfSchool)}</td>
+                  <td>${badge(e.enrollmentStatus)}</td>
                 </tr>`).join('')}
             </tbody>
           </table>

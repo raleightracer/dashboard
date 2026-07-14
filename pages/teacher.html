@@ -65,14 +65,49 @@ if (session) {
   renderShell(session, 'Teacher Dashboard');
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Resolve teacher data by session id — same key used in MOCK_DATA.teachers.
     const td = MOCK_DATA.teachers[session.id];
+    const areas = getEnrollmentAreas();
+    const teacherAssignment = areas
+      .map(area => {
+        const assignment = (area.teachers || []).find(t => t.userId === session.id);
+        return assignment ? { area, assignment } : null;
+      })
+      .find(Boolean);
 
-    if (!td) {
+    if (!td || !teacherAssignment) {
       document.getElementById('main-content').innerHTML =
-        `<p style="color:var(--text-secondary);padding:32px">No classroom data found for this account.</p>`;
+        `<p style="color:var(--text-secondary);padding:32px">No classroom assignment found for this account.</p>`;
       return;
     }
+
+    const assignedClassIds = teacherAssignment.assignment.classroomIds || [];
+    const assignedClassrooms = teacherAssignment.area.classrooms.filter(c => assignedClassIds.includes(c.id));
+    const assignedClassNames = assignedClassrooms.map(c => c.name).join(', ');
+
+    function parseDateOnly(isoDate) {
+      return new Date(isoDate + 'T00:00:00');
+    }
+
+    function ageYears(dob) {
+      const birth = parseDateOnly(dob);
+      const now = new Date();
+      let years = now.getFullYear() - birth.getFullYear();
+      const hasHadBirthday = (now.getMonth() > birth.getMonth()) ||
+        (now.getMonth() === birth.getMonth() && now.getDate() >= birth.getDate());
+      if (!hasHadBirthday) years -= 1;
+      return Math.max(0, years);
+    }
+
+    const assignedStudents = teacherAssignment.area.students
+      .filter(st => assignedClassIds.includes(st.classroomId) && st.enrollmentStatus === 'Approved')
+      .map(st => ({
+        id: st.id,
+        name: `${st.firstName} ${st.lastName}`,
+        age: ageYears(st.dob),
+        parentName: st.guardian?.fullName || '—',
+        parentContact: st.guardian?.contactNumber || '—',
+        notes: st.comments || st.medicalConditions || '',
+      }));
 
     /**
      * Returns how many days remain until a date string.
@@ -100,10 +135,11 @@ if (session) {
         <div>
           <div class="teacher-hero-name">${td.fullName}</div>
           <div class="teacher-hero-sub">${td.gradeLevel}</div>
-          <div class="teacher-hero-tag"><i class="ti ti-door" aria-hidden="true"></i> ${td.classroom}</div>
+          <div class="teacher-hero-tag"><i class="ti ti-door" aria-hidden="true"></i> ${assignedClassNames || td.classroom}</div>
+          <div style="font-size:12px;opacity:0.9;margin-top:6px">${teacherAssignment.area.name} - ${teacherAssignment.area.branchName}</div>
         </div>
         <div style="margin-left:auto;text-align:right">
-          <div style="font-size:28px;font-weight:700">${td.students.length}</div>
+          <div style="font-size:28px;font-weight:700">${assignedStudents.length}</div>
           <div style="font-size:12px;opacity:0.8">Students enrolled</div>
         </div>
       </div>
@@ -122,12 +158,12 @@ if (session) {
       <section id="section-students" class="section" aria-labelledby="heading-students">
         <div class="section-title">
           <i class="ti ti-users-group" aria-hidden="true"></i>
-          <h2 id="heading-students" style="font:inherit">My Students — ${td.classroom}</h2>
+          <h2 id="heading-students" style="font:inherit">My Students — ${assignedClassNames || td.classroom}</h2>
         </div>
         <div class="card">
           <div class="card-header">
             <span class="card-title">Student Roster</span>
-            <span style="font-size:12px;color:var(--text-muted)">${td.students.length} student${td.students.length !== 1 ? 's' : ''}</span>
+            <span style="font-size:12px;color:var(--text-muted)">${assignedStudents.length} student${assignedStudents.length !== 1 ? 's' : ''}</span>
           </div>
           <div class="table-wrap">
             <table>
@@ -135,7 +171,9 @@ if (session) {
                 <tr><th>#</th><th>Name</th><th>Age</th><th>Parent / Guardian</th><th>Contact</th><th>Notes</th></tr>
               </thead>
               <tbody>
-                ${td.students.map((s, i) => `
+                ${assignedStudents.length === 0
+                  ? `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">No approved students assigned yet.</td></tr>`
+                  : assignedStudents.map((s, i) => `
                   <tr>
                     <td style="color:var(--text-muted)">${i + 1}</td>
                     <td><strong>${s.name}</strong></td>
