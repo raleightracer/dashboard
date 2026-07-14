@@ -12,6 +12,8 @@
 
 'use strict';
 
+const ENROLLMENT_AREAS_KEY = 'sms_enrollment_areas_v1';
+
 /* ─────────────────────────────────────────────────────────────────────────────
  * ROUTING TABLE
  * Maps each role to its canonical page path (relative to project root).
@@ -33,6 +35,7 @@ const ROLE_ROUTES = Object.freeze({
 const PAGE_ROLES = Object.freeze({
   'executive.html':   ['executive'],
   'enrollment.html':  ['enrollment',  'executive'],
+  'student-profile.html': ['enrollment', 'executive'],
   'procurement.html': ['procurement', 'executive'],
   'hr.html':          ['hr',          'executive'],
   'teacher.html':     ['teacher'],
@@ -46,11 +49,29 @@ const PAGE_ROLES = Object.freeze({
 const NAV_CONFIG = Object.freeze({
   executive: [
     { label: 'Executive Summary', icon: 'ti-layout-dashboard', href: 'executive.html'   },
-    { label: 'Enrollment',        icon: 'ti-school',           href: 'enrollment.html'  },
+    {
+      label: 'Enrollment',
+      icon: 'ti-school',
+      href: 'enrollment.html',
+      children: [
+        { label: 'Area 1', href: 'enrollment.html?area=area1' },
+        { label: 'Area 2', href: 'enrollment.html?area=area2' },
+      ],
+    },
     { label: 'Procurement',       icon: 'ti-shopping-cart',    href: 'procurement.html' },
     { label: 'HR Staff',          icon: 'ti-users',            href: 'hr.html'          },
   ],
-  enrollment:  [{ label: 'Enrollment',  icon: 'ti-school',        href: 'enrollment.html'  }],
+  enrollment: [
+    {
+      label: 'Enrollment',
+      icon: 'ti-school',
+      href: 'enrollment.html',
+      children: [
+        { label: 'Area 1', href: 'enrollment.html?area=area1' },
+        { label: 'Area 2', href: 'enrollment.html?area=area2' },
+      ],
+    },
+  ],
   procurement: [{ label: 'Procurement', icon: 'ti-shopping-cart', href: 'procurement.html' }],
   hr:          [{ label: 'HR Staff',    icon: 'ti-users',         href: 'hr.html'          }],
   teacher: [
@@ -133,12 +154,22 @@ function renderShell(session, pageTitle) {
   const navItems = (NAV_CONFIG[session.role] ?? [])
     .map(item => {
       const isAnchor = item.href.startsWith('#');
-      const isActive = !isAnchor && item.href === window.location.pathname.split('/').pop();
+      const currentPageWithQuery = window.location.pathname.split('/').pop() + window.location.search;
+      const pageOnly = window.location.pathname.split('/').pop();
+      const isActive = !isAnchor && (item.href === currentPageWithQuery || item.href === pageOnly);
+      const childItems = (item.children ?? [])
+        .map(child => {
+          const childIsActive = child.href === currentPageWithQuery;
+          return `<a href="${child.href}" class="sub-nav-item${childIsActive ? ' active' : ''}">${child.label}</a>`;
+        })
+        .join('');
+
       return `
         <a href="${item.href}" class="nav-item${isActive ? ' active' : ''}">
           <i class="ti ${item.icon}" aria-hidden="true"></i>
           <span>${item.label}</span>
-        </a>`;
+        </a>
+        ${childItems ? `<div class="sub-nav">${childItems}</div>` : ''}`;
     })
     .join('');
 
@@ -297,4 +328,38 @@ function openModal(title, bodyHTML, onConfirm) {
 
   // Trap focus on the first focusable element inside the modal.
   modal.querySelector('button')?.focus();
+}
+
+function getEnrollmentAreas() {
+  try {
+    const raw = localStorage.getItem(ENROLLMENT_AREAS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        let changed = false;
+        parsed.forEach(area => {
+          (area.teachers || []).forEach(t => {
+            if (!Object.prototype.hasOwnProperty.call(t, 'userId')) {
+              if (t.id === 'a1-t01') t.userId = 't01';
+              else if (t.id === 'a2-t02') t.userId = 't02';
+              else t.userId = null;
+              changed = true;
+            }
+          });
+        });
+        if (changed) localStorage.setItem(ENROLLMENT_AREAS_KEY, JSON.stringify(parsed));
+        return parsed;
+      }
+    }
+  } catch {
+    // fallback to seed data below
+  }
+
+  const seeded = structuredClone(MOCK_DATA.enrollmentAreas ?? []);
+  localStorage.setItem(ENROLLMENT_AREAS_KEY, JSON.stringify(seeded));
+  return seeded;
+}
+
+function saveEnrollmentAreas(areas) {
+  localStorage.setItem(ENROLLMENT_AREAS_KEY, JSON.stringify(areas));
 }

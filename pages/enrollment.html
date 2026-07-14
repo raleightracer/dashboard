@@ -17,136 +17,453 @@
 const session = guardPage();
 
 if (session) {
-  renderShell(session, 'Enrollment Management');
-
-  // Working copy — mutations never touch the frozen MOCK_DATA source.
-  let records      = structuredClone(MOCK_DATA.enrollments);
   let activeFilter = 'All';
+  const areas = getEnrollmentAreas();
+  const areaFromQuery = new URLSearchParams(window.location.search).get('area') || areas[0]?.id;
+  let activeAreaId = areas.some(a => a.id === areaFromQuery) ? areaFromQuery : areas[0]?.id;
 
-  /** Updates a record's status in the working copy and re-renders. */
-  function setStatus(id, status) {
-    const rec = records.find(r => r.id === id);
-    if (rec) { rec.status = status; render(); showToast(`Application ${status.toLowerCase()}.`); }
+  function getArea() {
+    return areas.find(a => a.id === activeAreaId);
   }
 
-  function setFilter(val) { activeFilter = val; render(); }
+  function parseDateOnly(isoDate) {
+    return new Date(isoDate + 'T00:00:00');
+  }
+
+  function getAgeParts(dob, onDate = new Date()) {
+    const birth = parseDateOnly(dob);
+    let years = onDate.getFullYear() - birth.getFullYear();
+    let months = onDate.getMonth() - birth.getMonth();
+    if (onDate.getDate() < birth.getDate()) {
+      months -= 1;
+    }
+    if (months < 0) {
+      years -= 1;
+      months += 12;
+    }
+    return { years: Math.max(0, years), months: Math.max(0, months) };
+  }
+
+  function getAgeInMonths(dob, onDate = new Date()) {
+    const p = getAgeParts(dob, onDate);
+    return (p.years * 12) + p.months;
+  }
+
+  function formatHumanAge(dob) {
+    const { years, months } = getAgeParts(dob);
+    const bits = [];
+    if (years > 0) bits.push(`${years} year${years === 1 ? '' : 's'}`);
+    if (months > 0 || years === 0) bits.push(`${months} month${months === 1 ? '' : 's'}`);
+    return bits.join(' ');
+  }
+
+  function classById(area, id) {
+    return area.classrooms.find(c => c.id === id);
+  }
+
+  function getActiveStudents(area) {
+    return area.students.filter(s => s.enrollmentStatus !== 'Rejected');
+  }
+
+  function transitionTarget(area, classroom) {
+    return area.classrooms.find(c => c.minMonths === classroom.maxMonths) || null;
+  }
+
+  function getAutoTransitionDate(student, classroom) {
+    if (!classroom || classroom.maxMonths == null) return null;
+    const birth = parseDateOnly(student.dob);
+    return new Date(birth.getFullYear(), birth.getMonth() + classroom.maxMonths, birth.getDate());
+  }
+
+  function applyScheduledTransfers(area) {
+    const todayIso = new Date().toISOString().split('T')[0];
+    area.scheduledTransfers.forEach(tr => {
+      if (!tr.completedOn && tr.effectiveDate <= todayIso) {
+        const student = area.students.find(s => s.id === tr.studentId);
+        if (student) student.classroomId = tr.toClassroomId;
+        tr.completedOn = todayIso;
+      }
+    });
+  }
+
+  function setArea(areaId) {
+    activeAreaId = areaId;
+    const url = new URL(window.location.href);
+    url.searchParams.set('area', areaId);
+    history.replaceState({}, '', url);
+    render();
+  }
+
+  function setFilter(val) {
+    activeFilter = val;
+    render();
+  }
+
+  function updateStudentStatus(studentId, status) {
+    const area = getArea();
+    const st = area.students.find(s => s.id === studentId);
+    if (!st) return;
+    st.enrollmentStatus = status;
+    saveEnrollmentAreas(areas);
+    showToast(`Enrollment ${status.toLowerCase()}.`);
+    render();
+  }
+
+  function getClassroomForecast(area, classroom, targetDate = new Date()) {
+    const active = getActiveStudents(area).filter(s => s.classroomId === classroom.id);
+    const effectiveTransfers = area.scheduledTransfers.filter(t => !t.completedOn && t.effectiveDate <= targetDate.toISOString().split('T')[0]);
+    let enrolledAtDate = active.length;
+
+    effectiveTransfers.forEach(tr => {
+      if (tr.fromClassroomId === classroom.id) enrolledAtDate -= 1;
+      if (tr.toClassroomId === classroom.id) enrolledAtDate += 1;
+    });
+
+    const reservedFutureSpots = area.scheduledTransfers.filter(t => !t.completedOn && t.toClassroomId === classroom.id && t.effectiveDate > new Date().toISOString().split('T')[0]).length;
+    const openSlots = Math.max(0, classroom.capacity - active.length);
+    const availableSlots = Math.max(0, classroom.capacity - active.length - reservedFutureSpots);
+    const availableAtDate = Math.max(0, classroom.capacity - Math.max(0, enrolledAtDate));
+
+    return {
+      capacity: classroom.capacity,
+      currentEnrollment: active.length,
+      openSlots,
+      reservedFutureSpots,
+      availableSlots,
+      availableAtDate,
+    };
+  }
+
+  function getUpcomingOpenings(area) {
+    const upcoming = [];
+    const active = getActiveStudents(area);
+
+    active.forEach(student => {
+      const current = classById(area, student.classroomId);
+      const nextClass = transitionTarget(area, current);
+      const transitionDate = getAutoTransitionDate(student, current);
+      if (!current || !nextClass || !transitionDate) return;
+
+      upcoming.push({
+        student,
+        fromClass: current,
+        toClass: nextClass,
+        date: transitionDate,
+        reason: `${student.firstName} transitions to ${nextClass.type}.`,
+      });
+    });
+
+    area.scheduledTransfers
+      .filter(t => !t.completedOn)
+      .forEach(tr => {
+        const student = area.students.find(s => s.id === tr.studentId);
+        const fromClass = classById(area, tr.fromClassroomId);
+        const toClass = classById(area, tr.toClassroomId);
+        if (!student || !fromClass || !toClass) return;
+        upcoming.push({
+          student,
+          fromClass,
+          toClass,
+          date: parseDateOnly(tr.effectiveDate),
+          reason: tr.reason || 'Scheduled transfer',
+        });
+      });
+
+    return upcoming
+      .sort((a, b) => a.date - b.date)
+      .slice(0, 10);
+  }
+
+  function buildInquiryInsights(area) {
+    const openings = getUpcomingOpenings(area);
+    return (area.inquiries || []).map(inquiry => {
+      const matching = openings.find(o => o.toClass.type === inquiry.preferredClassType || o.fromClass.type === inquiry.preferredClassType);
+      if (!matching) {
+        return {
+          ...inquiry,
+          classroom: 'No immediate opening',
+          availableDate: null,
+          reason: 'No projected transition found in current forecast window.',
+          estimatedSlots: 0,
+        };
+      }
+
+      const forecast = getClassroomForecast(area, matching.toClass, matching.date);
+      return {
+        ...inquiry,
+        classroom: matching.toClass.name,
+        availableDate: matching.date,
+        reason: matching.reason,
+        estimatedSlots: forecast.availableAtDate,
+      };
+    });
+  }
+
+  function scheduleTransfer(studentId) {
+    const area = getArea();
+    const student = area.students.find(s => s.id === studentId);
+    if (!student) return;
+
+    const fromClass = classById(area, student.classroomId);
+    const toClass = transitionTarget(area, fromClass);
+    const defaultDate = getAutoTransitionDate(student, fromClass);
+
+    if (!fromClass || !toClass || !defaultDate) {
+      showToast('No valid transfer target for this student.', 'danger');
+      return;
+    }
+
+    openModal(`Move ${student.firstName} ${student.lastName}`, `
+      <div class="form-group">
+        <label class="form-label">From</label>
+        <input class="form-control" value="${fromClass.type}" disabled />
+      </div>
+      <div class="form-group">
+        <label class="form-label">To</label>
+        <input class="form-control" value="${toClass.type}" disabled />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="tr-effective">Effective Date</label>
+        <input class="form-control" id="tr-effective" type="date" value="${defaultDate.toISOString().split('T')[0]}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="tr-reason">Reason</label>
+        <input class="form-control" id="tr-reason" value="Age-based transition" />
+      </div>
+    `, () => {
+      const dateValue = document.getElementById('tr-effective').value;
+      const reason = document.getElementById('tr-reason').value.trim();
+      if (!dateValue) {
+        showToast('Effective date is required.', 'danger');
+        return;
+      }
+      area.scheduledTransfers.push({
+        id: `tr-${Date.now()}`,
+        studentId: student.id,
+        fromClassroomId: fromClass.id,
+        toClassroomId: toClass.id,
+        effectiveDate: dateValue,
+        reason,
+        completedOn: null,
+      });
+      saveEnrollmentAreas(areas);
+      showToast('Transfer scheduled successfully.');
+      render();
+    });
+  }
+
+  function openStudentProfile(studentId) {
+    const url = `student-profile.html?area=${encodeURIComponent(activeAreaId)}&student=${encodeURIComponent(studentId)}`;
+    window.location.href = url;
+  }
+
+  function openStudentQuickView(studentId) {
+    const area = getArea();
+    const student = area?.students.find(s => s.id === studentId);
+    if (!student) return;
+    const classroom = classById(area, student.classroomId);
+    const displayName = `${student.firstName} ${student.lastName}`;
+
+    openModal(displayName, `
+      <div class="profile-header-inner" style="grid-template-columns:auto 1fr;align-items:start">
+        <img class="profile-photo" src="${student.photo}" alt="${displayName}" />
+        <div>
+          <div class="classroom-tag">${classroom ? classroom.type : 'Unassigned'}</div>
+          <p class="profile-meta" style="margin-top:6px">${formatHumanAge(student.dob)} old</p>
+        </div>
+      </div>
+      <div class="profile-grid" style="margin-top:14px">
+        <div class="detail-item"><span>Birthday</span><strong>${formatDate(student.dob)}</strong></div>
+        <div class="detail-item"><span>Nickname</span><strong>${student.nickname || '—'}</strong></div>
+        <div class="detail-item"><span>Street Address</span><strong>${student.address?.street || '—'}</strong></div>
+        <div class="detail-item"><span>City</span><strong>${student.address?.city || '—'}</strong></div>
+        <div class="detail-item"><span>State</span><strong>${student.address?.state || '—'}</strong></div>
+        <div class="detail-item"><span>ZIP Code</span><strong>${student.address?.zipCode || '—'}</strong></div>
+        <div class="detail-item"><span>Allergies</span><strong>${student.allergies || 'None'}</strong></div>
+        <div class="detail-item"><span>Medications</span><strong>${student.medications || 'None'}</strong></div>
+        <div class="detail-item detail-item-wide"><span>Medical Conditions</span><strong>${student.medicalConditions || 'None'}</strong></div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">Primary Guardian</div>
+        <div style="font-size:13px;line-height:1.6">
+          <strong>${student.guardian?.relation || '—'}:</strong> ${student.guardian?.fullName || '—'}<br />
+          ${student.guardian?.contactNumber || '—'}<br />
+          ${student.guardian?.email || '—'}
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn btn-primary btn-sm" onclick="openStudentProfile('${student.id}')">Open Full Profile</button>
+      </div>
+    `, () => {});
+  }
 
   function render() {
-    const filtered  = activeFilter === 'All' ? records : records.filter(r => r.status === activeFilter);
-    const counts    = { total: records.length };
-    ['Approved','Pending','Rejected'].forEach(s => { counts[s] = records.filter(r => r.status === s).length; });
+    const area = getArea();
+    if (!area) return;
+
+    applyScheduledTransfers(area);
+    saveEnrollmentAreas(areas);
+
+    const statuses = ['Approved', 'Pending', 'Rejected'];
+    const counts = {
+      total: area.students.length,
+      Approved: area.students.filter(s => s.enrollmentStatus === 'Approved').length,
+      Pending: area.students.filter(s => s.enrollmentStatus === 'Pending').length,
+      Rejected: area.students.filter(s => s.enrollmentStatus === 'Rejected').length,
+    };
+
+    const students = (activeFilter === 'All'
+      ? area.students
+      : area.students.filter(s => s.enrollmentStatus === activeFilter)
+    ).slice().sort((a, b) => a.lastName.localeCompare(b.lastName));
+
+    const classroomCards = area.classrooms.map(cls => {
+      const todayForecast = getClassroomForecast(area, cls, new Date());
+      const probeDate = new Date();
+      probeDate.setMonth(probeDate.getMonth() + 3);
+      const futureForecast = getClassroomForecast(area, cls, probeDate);
+      return `
+        <div class="card classroom-forecast-card">
+          <div class="card-body">
+            <div class="classroom-title">${cls.name}</div>
+            <div class="forecast-grid">
+              <div><span>Capacity</span><strong>${todayForecast.capacity}</strong></div>
+              <div><span>Currently Enrolled</span><strong>${todayForecast.currentEnrollment}</strong></div>
+              <div><span>Reserved Future Spots</span><strong>${todayForecast.reservedFutureSpots}</strong></div>
+              <div><span>Available Today</span><strong>${todayForecast.availableSlots}</strong></div>
+              <div><span>Available on ${formatDate(probeDate.toISOString().split('T')[0])}</span><strong>${futureForecast.availableAtDate}</strong></div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    const openings = getUpcomingOpenings(area);
+    const inquiryRows = buildInquiryInsights(area);
 
     document.getElementById('main-content').innerHTML = `
+      <section class="section area-switcher-row">
+        <div class="area-headline">
+          <h2>${area.name}</h2>
+          <p>${area.branchName}</p>
+        </div>
+        <div class="area-switcher-buttons">
+          ${areas.map(a => `<button class="btn btn-sm ${a.id === area.id ? 'btn-primary' : 'btn-secondary'}" onclick="setArea('${a.id}')">${a.name}</button>`).join('')}
+        </div>
+      </section>
+
       <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)">
-        <div class="stat-card accent"><div class="stat-label">Total</div><div class="stat-value">${counts.total}</div></div>
-        <div class="stat-card success"><div class="stat-label">Approved</div><div class="stat-value">${counts.Approved}</div></div>
-        <div class="stat-card warning"><div class="stat-label">Pending</div><div class="stat-value">${counts.Pending}</div></div>
-        <div class="stat-card danger"><div class="stat-label">Rejected</div><div class="stat-value">${counts.Rejected}</div></div>
+        <div class="stat-card accent"><div class="stat-label">Total Students</div><div class="stat-value">${counts.total}</div></div>
+        <div class="stat-card success"><div class="stat-label">Approved Enrollments</div><div class="stat-value">${counts.Approved}</div></div>
+        <div class="stat-card warning"><div class="stat-label">Pending Enrollments</div><div class="stat-value">${counts.Pending}</div></div>
+        <div class="stat-card danger"><div class="stat-label">Rejected Enrollments</div><div class="stat-value">${counts.Rejected}</div></div>
       </div>
 
-      <div class="card">
+      <div class="card section">
         <div class="card-header">
-          <span class="card-title">Student Applications</span>
+          <span class="card-title">Students</span>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            ${['All','Pending','Approved','Rejected'].map(s =>
-              `<button class="btn btn-sm ${activeFilter===s?'btn-primary':'btn-secondary'}"
-                       onclick="setFilter('${s}')">${s}</button>`
-            ).join('')}
-            <button class="btn btn-primary btn-sm" onclick="openAddModal()">
-              <i class="ti ti-plus" aria-hidden="true"></i> New Application
-            </button>
+            ${['All', ...statuses].map(s => `<button class="btn btn-sm ${activeFilter === s ? 'btn-primary' : 'btn-secondary'}" onclick="setFilter('${s}')">${s}</button>`).join('')}
           </div>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Student</th><th>Age</th><th>Program</th>
-                <th>Parent / Guardian</th><th>Contact</th><th>Applied</th>
-                <th>Status</th><th>Actions</th>
+                <th>Last Name</th>
+                <th>First Name</th>
+                <th>Class</th>
+                <th>Date of Birth</th>
+                <th>Age</th>
+                <th>Status</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              ${filtered.length === 0
-                ? `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:32px">No records match this filter.</td></tr>`
-                : filtered.map(e => `
-                  <tr>
-                    <td><strong>${e.studentName}</strong></td>
-                    <td>${e.age} yrs</td>
-                    <td>${e.program}</td>
-                    <td>${e.parentName}</td>
-                    <td><a href="tel:${e.contact}" style="color:var(--accent)">${e.contact}</a></td>
-                    <td>${formatDate(e.appliedDate)}</td>
-                    <td>${badge(e.status)}</td>
-                    <td>
-                      <div class="action-btns">
-                        ${e.status === 'Pending' ? `
-                          <button class="btn btn-sm btn-success" onclick="setStatus('${e.id}','Approved')" title="Approve">
-                            <i class="ti ti-check" aria-hidden="true"></i>
-                          </button>
-                          <button class="btn btn-sm btn-danger" onclick="setStatus('${e.id}','Rejected')" title="Reject">
-                            <i class="ti ti-x" aria-hidden="true"></i>
-                          </button>`
-                        : `<button class="btn btn-sm btn-secondary" onclick="setStatus('${e.id}','Pending')" title="Reset to Pending">
-                            <i class="ti ti-refresh" aria-hidden="true"></i>
-                           </button>`}
-                      </div>
-                    </td>
-                  </tr>`).join('')}
+              ${students.length === 0
+                ? `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:32px">No records match this filter.</td></tr>`
+                : students.map(s => {
+                    const classroom = classById(area, s.classroomId);
+                    return `
+                      <tr>
+                        <td><a class="student-link" href="javascript:void(0)" onclick="openStudentQuickView('${s.id}')">${s.lastName}</a></td>
+                        <td><a class="student-link" href="javascript:void(0)" onclick="openStudentQuickView('${s.id}')">${s.firstName}</a></td>
+                        <td>${classroom ? classroom.type : '—'}</td>
+                        <td>${formatDate(s.dob)}</td>
+                        <td>${formatHumanAge(s.dob)}</td>
+                        <td>${badge(s.enrollmentStatus)}</td>
+                        <td>
+                          <div class="action-btns">
+                            ${s.enrollmentStatus === 'Pending'
+                              ? `
+                                <button class="btn btn-sm btn-success" onclick="updateStudentStatus('${s.id}','Approved')" title="Approve"><i class="ti ti-check" aria-hidden="true"></i></button>
+                                <button class="btn btn-sm btn-danger" onclick="updateStudentStatus('${s.id}','Rejected')" title="Reject"><i class="ti ti-x" aria-hidden="true"></i></button>`
+                              : `<button class="btn btn-sm btn-secondary" onclick="updateStudentStatus('${s.id}','Pending')" title="Reset"><i class="ti ti-refresh" aria-hidden="true"></i></button>`}
+                            <button class="btn btn-sm btn-warning" onclick="scheduleTransfer('${s.id}')" title="Schedule Move"><i class="ti ti-arrows-transfer-up-down" aria-hidden="true"></i></button>
+                          </div>
+                        </td>
+                      </tr>`;
+                  }).join('')}
             </tbody>
           </table>
         </div>
-      </div>`;
-  }
+      </div>
 
-  function openAddModal() {
-    openModal('New Student Application', `
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label" for="f-name">Student Name</label>
-          <input class="form-control" id="f-name" placeholder="Full name" />
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="f-age">Age</label>
-          <input class="form-control" id="f-age" type="number" min="1" max="7" placeholder="3" />
+      <div class="section">
+        <h3 class="section-title"><i class="ti ti-chart-line"></i> Predictive Enrollment</h3>
+        <div class="predictive-cards">${classroomCards}</div>
+      </div>
+
+      <div class="card section">
+        <div class="card-header"><span class="card-title">Upcoming Openings</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Student</th><th>Currently</th><th>Transition Date</th><th>Future Class</th><th>Reason</th></tr>
+            </thead>
+            <tbody>
+              ${openings.length === 0
+                ? `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">No upcoming transitions found.</td></tr>`
+                : openings.map(o => `
+                  <tr>
+                    <td>${o.student.firstName} ${o.student.lastName}</td>
+                    <td>${o.fromClass.type}</td>
+                    <td>${formatDate(o.date.toISOString().split('T')[0])}</td>
+                    <td>${o.toClass.type}</td>
+                    <td>${o.reason}</td>
+                  </tr>
+                `).join('')}
+            </tbody>
+          </table>
         </div>
       </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label" for="f-parent">Parent / Guardian</label>
-          <input class="form-control" id="f-parent" placeholder="Full name" />
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="f-contact">Contact Number</label>
-          <input class="form-control" id="f-contact" placeholder="09XXXXXXXXX" />
+
+      <div class="card section">
+        <div class="card-header"><span class="card-title">Waitlist & Inquiry Support</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Family</th><th>Preferred Class</th><th>Earliest Opening</th><th>Reason</th><th>Estimated Open Slots</th></tr>
+            </thead>
+            <tbody>
+              ${inquiryRows.length === 0
+                ? `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">No inquiries yet.</td></tr>`
+                : inquiryRows.map(row => `
+                  <tr>
+                    <td>${row.familyName}</td>
+                    <td>${row.preferredClassType}</td>
+                    <td>${row.classroom}${row.availableDate ? ` • ${formatDate(row.availableDate.toISOString().split('T')[0])}` : ''}</td>
+                    <td>${row.reason}</td>
+                    <td>${row.estimatedSlots}</td>
+                  </tr>
+                `).join('')}
+            </tbody>
+          </table>
         </div>
       </div>
-      <div class="form-group">
-        <label class="form-label" for="f-program">Program</label>
-        <select class="form-control" id="f-program">
-          <option>Full Day</option>
-          <option>Half Day</option>
-        </select>
-      </div>`, () => {
-        const name    = document.getElementById('f-name').value.trim();
-        const age     = parseInt(document.getElementById('f-age').value);
-        const parent  = document.getElementById('f-parent').value.trim();
-        const contact = document.getElementById('f-contact').value.trim();
-        const program = document.getElementById('f-program').value;
-        if (!name || !age || !parent) {
-          showToast('Name, age, and parent are required.', 'danger');
-          return;
-        }
-        records.unshift({
-          id: `e${Date.now()}`, studentName: name, age, parentName: parent,
-          contact, program, status: 'Pending',
-          appliedDate: new Date().toISOString().split('T')[0],
-        });
-        render();
-        showToast('Application submitted successfully.');
-      });
+    `;
   }
 
+  renderShell(session, 'Enrollment Management');
   document.addEventListener('DOMContentLoaded', render);
 }
 </script>

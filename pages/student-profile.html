@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Student Profile — Bright Minds</title>
+  <link rel="stylesheet" href="../assets/css/styles.css" />
+</head>
+<body>
+
+<script src="../assets/data/mockData.js"></script>
+<script src="../assets/js/auth.js"></script>
+<script src="../assets/js/rbac.js"></script>
+<script>
+'use strict';
+
+const session = guardPage();
+
+if (session) {
+  const areas = getEnrollmentAreas();
+  const params = new URLSearchParams(window.location.search);
+  const areaId = params.get('area');
+  const studentId = params.get('student');
+
+  const area = areas.find(a => a.id === areaId) || areas[0];
+  const student = area?.students.find(s => s.id === studentId);
+
+  function classById(id) {
+    return area.classrooms.find(c => c.id === id);
+  }
+
+  function parseDateOnly(isoDate) {
+    return new Date(isoDate + 'T00:00:00');
+  }
+
+  function getAgeText(dob) {
+    const birth = parseDateOnly(dob);
+    const now = new Date();
+    let years = now.getFullYear() - birth.getFullYear();
+    let months = now.getMonth() - birth.getMonth();
+    if (now.getDate() < birth.getDate()) months -= 1;
+    if (months < 0) {
+      years -= 1;
+      months += 12;
+    }
+    const parts = [];
+    if (years > 0) parts.push(`${years} year${years === 1 ? '' : 's'}`);
+    if (months > 0 || years === 0) parts.push(`${months} month${months === 1 ? '' : 's'}`);
+    return parts.join(' ');
+  }
+
+  function editNickname() {
+    if (!student) return;
+    openModal('Edit Nickname', `
+      <div class="form-group">
+        <label class="form-label" for="nickname-input">Nickname</label>
+        <input class="form-control" id="nickname-input" value="${student.nickname || ''}" placeholder="Add nickname" />
+      </div>
+    `, () => {
+      student.nickname = document.getElementById('nickname-input').value.trim();
+      saveEnrollmentAreas(areas);
+      render();
+      showToast('Nickname updated.');
+    });
+  }
+
+  function renderNotFound() {
+    document.getElementById('main-content').innerHTML = `
+      <div class="card">
+        <div class="card-body">
+          <p>Student record not found.</p>
+          <a class="btn btn-primary" href="enrollment.html?area=${encodeURIComponent(area?.id || '')}">Back to Enrollment</a>
+        </div>
+      </div>
+    `;
+  }
+
+  function render() {
+    if (!student || !area) {
+      renderNotFound();
+      return;
+    }
+
+    const classroom = classById(student.classroomId);
+
+    document.getElementById('main-content').innerHTML = `
+      <div class="profile-header card section">
+        <div class="card-body profile-header-inner">
+          <img class="profile-photo" src="${student.photo}" alt="${student.firstName} ${student.lastName}" />
+          <div>
+            <h2 class="profile-name">${student.firstName} ${student.lastName}</h2>
+            <div class="classroom-tag">${classroom ? classroom.type : 'Unassigned'}</div>
+            <p class="profile-meta">${getAgeText(student.dob)} old • ${area.name}</p>
+          </div>
+          <a class="btn btn-secondary" href="enrollment.html?area=${encodeURIComponent(area.id)}">Back to Enrollment</a>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="card-header"><span class="card-title">Student Details</span></div>
+        <div class="card-body profile-grid">
+          <div class="detail-item"><span>Birthday</span><strong>${formatDate(student.dob)}</strong></div>
+          <div class="detail-item">
+            <span>Nickname</span>
+            <strong>${student.nickname || '—'}</strong>
+            <button class="btn btn-sm btn-secondary" onclick="editNickname()">Edit</button>
+          </div>
+          <div class="detail-item"><span>Street Address</span><strong>${student.address?.street || '—'}</strong></div>
+          <div class="detail-item"><span>City</span><strong>${student.address?.city || '—'}</strong></div>
+          <div class="detail-item"><span>State</span><strong>${student.address?.state || '—'}</strong></div>
+          <div class="detail-item"><span>ZIP Code</span><strong>${student.address?.zipCode || '—'}</strong></div>
+          <div class="detail-item"><span>Allergies</span><strong>${student.allergies || 'None'}</strong></div>
+          <div class="detail-item"><span>Medications</span><strong>${student.medications || 'None'}</strong></div>
+          <div class="detail-item"><span>Medical Conditions</span><strong>${student.medicalConditions || 'None'}</strong></div>
+          <div class="detail-item"><span>First Day of School</span><strong>${formatDate(student.firstDayOfSchool)}</strong></div>
+          <div class="detail-item detail-item-wide"><span>Comments (Admin Only)</span><strong>${student.comments || '—'}</strong></div>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="card-header"><span class="card-title">Family Information</span></div>
+        <div class="card-body">
+          <h3 class="mini-heading">Primary Guardian</h3>
+          <div class="profile-grid guardian-grid">
+            <div class="detail-item"><span>Mother or Father</span><strong>${student.guardian?.relation || '—'}</strong></div>
+            <div class="detail-item"><span>Full Name</span><strong>${student.guardian?.fullName || '—'}</strong></div>
+            <div class="detail-item"><span>Contact Number</span><strong>${student.guardian?.contactNumber || '—'}</strong></div>
+            <div class="detail-item"><span>Email Address</span><strong>${student.guardian?.email || '—'}</strong></div>
+            <div class="detail-item detail-item-wide"><span>Home Address</span><strong>${student.guardian?.homeAddress || '—'}</strong></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  renderShell(session, 'Student Profile');
+  document.addEventListener('DOMContentLoaded', render);
+}
+</script>
+</body>
+</html>
